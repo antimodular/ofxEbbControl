@@ -18,7 +18,7 @@
 
 ## 🛠 Installation
 
-1. Clone this repository and clone the `ofxEbbControl` folder into your OF `addons/` directory.
+1. Clone this repository and copy the `ofxEbbControl` folder into your OF `addons/` directory.
 2. Ensure that `ofxEbbControl.h` and `addon_config.mk` are included.
 3. Use the Project Generator to add **ofxEbbControl** to your project.
 
