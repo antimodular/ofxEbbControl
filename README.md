@@ -4,7 +4,6 @@
 
 :warning: **Disclaimer:** This addon is experimental and mostly untested. It’s based on an **LLM-aided** automatic C++ port of the [jmpinit/ebb-control](https://github.com/jmpinit/ebb-control) JavaScript library and may contain bugs or incomplete behavior.
 
-
 ---
 
 ## ✨ Features
@@ -21,6 +20,12 @@
 1. Clone this repository and copy the `ofxEbbControl` folder into your OF `addons/` directory.
 2. Ensure that `ofxEbbControl.h` and `addon_config.mk` are included.
 3. Use the Project Generator to add **ofxEbbControl** to your project.
+
+---
+
+## 🖥️ Supported OpenFrameworks Versions
+
+This addon supports OpenFrameworks **v0.12.0**. Compatibility with other versions is not guaranteed.
 
 ---
 
