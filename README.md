@@ -64,5 +64,5 @@ See `src/ofxEbbControl.h` for full API docs and method descriptions.
 
 ## 📜 License
 
-This addon is released under the **MIT License**. See [LICENSE.md](LICENSE.md) for details.
+This addon is released under the **MIT License**. See [LICENSE](LICENSE) for details.
 
