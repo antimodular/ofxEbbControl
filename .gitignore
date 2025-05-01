@@ -1,0 +1,92 @@
+# .gitignore for OpenFrameworks addon (C++)
+
+#------------------------
+# Operating system files
+#------------------------
+.DS_Store
+Thumbs.db
+
+#------------------------
+# IDE / Editor
+#------------------------
+.vscode/
+*.code-workspace
+*.suo
+*.user
+*.userprefs
+*.ncb
+*.sdf
+*.opendb
+*.VC.db
+*.log
+
+#------------------------
+# OpenFrameworks
+#------------------------
+*.o
+*.lo
+*.la
+*.al
+*.obj
+*.lo
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# OF build folders
+bin/**
+obj/**
+lib/**
+addons/**/bin/**
+addons/**/obj/**
+
+# OF project files (optional generated)
+*.make*
+Makefile
+config.make
+project.godot
+
+#------------------------
+# Xcode
+#------------------------
+*.xcworkspace/
+*.xcuserdata/
+*.xcuserstate
+*.xcodeproj/project.xcworkspace/
+DerivedData/
+build/
+
+#------------------------
+# Visual Studio
+#------------------------
+*.vcxproj*
+*.vcproj*
+*.sln
+
+#------------------------
+# CMake
+#------------------------
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+#------------------------
+# Misc
+#------------------------
+*.tmp
+*.temp
+*.bak
+*~
+
+# Bundle apps (mac)
+*.app
+
+# Generated tags
+tags
+ctags
+
+# End of .gitignore
+
