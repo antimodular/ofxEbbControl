@@ -2,7 +2,8 @@
 
 > Experimental OpenFrameworks addon for EggBot/EiBotBoard control
 
-:warning: **Disclaimer:** This addon is experimental and mostly untested. It’s based on an LLM aided automatic C++ port of the [jmpinit/ebb-control](https://github.com/jmpinit/ebb-control) JavaScript library and may contain bugs or incomplete behavior.
+:warning: **Disclaimer:** This addon is experimental and mostly untested. It’s based on an **LLM-aided** automatic C++ port of the [jmpinit/ebb-control](https://github.com/jmpinit/ebb-control) JavaScript library and may contain bugs or incomplete behavior.
+
 
 ---
 
@@ -17,8 +18,8 @@
 
 ## 🛠 Installation
 
-1. Copy `ofxEbbControl` into your OF `addons/` folder.
-2. Ensure `addon_config.mk` and `README.md` are included.
+1. Clone this repository and clone the `ofxEbbControl` folder into your OF `addons/` directory.
+2. Ensure taht `ofxEbbControl.h` and `addon_config.mk` are included.
 3. Use the Project Generator to add **ofxEbbControl** to your project.
 
 ---
