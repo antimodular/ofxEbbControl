@@ -105,39 +105,49 @@ public:
 		// Read response
 		std::string result;
 		auto start = std::chrono::steady_clock::now();
-
-		for (int lineIndex = 0; lineIndex < numLines; ++lineIndex) {
-			std::string line;
-			while (true) {
-				char ch;
-				if (serial.readBytes(
-						reinterpret_cast<unsigned char *>(&ch),
-						1)
-					> 0) {
-					if (ch == '\n') {
-						break;
+		
+		// Use a buffered approach similar to the JavaScript implementation
+		std::string responseBuffer;
+		int linesFound = 0;
+		
+		// While we still need more lines and haven't timed out
+		while (linesFound < numLines) {
+			char ch;
+			int bytesRead = serial.readBytes(reinterpret_cast<unsigned char *>(&ch), 1);
+			
+			if (bytesRead > 0) {
+				responseBuffer.push_back(ch);
+				
+				// Check if we've found a complete line (CR+LF sequence)
+				if (responseBuffer.size() >= 2 && 
+					responseBuffer[responseBuffer.size()-2] == '\r' && 
+					responseBuffer[responseBuffer.size()-1] == '\n') {
+					linesFound++;
+					
+					// Extract the line without CR+LF
+					std::string line = responseBuffer.substr(0, responseBuffer.size()-2);
+					responseBuffer.clear();
+					
+					// Add to result, with newline separator if needed
+					if (!result.empty()) {
+						result += "\n";
 					}
-					if (ch != '\r') {
-						line.push_back(ch);
+					result += line;
+					
+					if (linesFound >= numLines) {
+						break; // We've got all the lines we need
 					}
 				}
+			} else {
+				// Check for timeout
 				auto now = std::chrono::steady_clock::now();
-				if (
-					std::chrono::duration_cast<
-						std::chrono::milliseconds>(now - start)
-						.count()
-					> timeoutMs) {
-					throw std::runtime_error(
-						"Command '" + cmd + "' timed out");
+				if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > timeoutMs) {
+					throw std::runtime_error("Command '" + cmd + "' timed out");
 				}
-				std::this_thread::sleep_for(
-					std::chrono::milliseconds(2));
+				
+				// Avoid busy waiting
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
 			}
-
-			if (!result.empty()) {
-				result += "\r\n";
-			}
-			result += line;
 		}
 
 		return result;
@@ -235,6 +245,10 @@ public:
 	void enableMotors(
 		int m1Mode,
 		int m2Mode) {
+		// Store the configuration for future reference by getMotorConfig()
+		static std::array<int, 2> & lastKnownConfig = getLastKnownMotorConfig();
+		lastKnownConfig = { m1Mode, m2Mode };
+
 		auto cmd = "EM," + toStr(m1Mode) + "," + toStr(m2Mode);
 		auto resp = sendCommand(cmd);
 		checkOk(resp);
@@ -254,7 +268,7 @@ public:
 		bool disableMotors = false) {
 		auto cmd = disableMotors ? "ES,1" : "ES";
 		auto resp = sendCommand(cmd, 2);
-		auto lines = split(resp, '\r');
+		auto lines = split(resp, '\n');
 		checkStatus(lines);
 
 		auto vals = split(lines[0], ',');
@@ -480,7 +494,7 @@ public:
    */
 	bool isButtonPressed() {
 		auto resp = sendCommand("QB", 2);
-		auto lines = split(resp, '\r');
+		auto lines = split(resp, '\n');
 		checkStatus(lines);
 		return lines[0] == "1";
 	}
@@ -495,7 +509,7 @@ public:
 	CurrentInfo getCurrentInfo(
 		bool oldBoard = false) {
 		auto resp = sendCommand("QC", 2);
-		auto lines = split(resp, '\r');
+		auto lines = split(resp, '\n');
 		checkStatus(lines);
 
 		auto vals = split(lines[0], ',');
@@ -510,27 +524,49 @@ public:
 	}
 
 	/**
-   * Query motor step mode config (QE).
+   * Query the EBB firmware version (QV).
+   */
+	std::string getFirmewareVersion() {
+		std::string resp = sendCommand("V");
+		return resp;
+	}
+
+	/**
+   * Query motor step mode config.
+   * Note: The QE command is only available in firmware v2.8.0 and newer.
+   * For compatibility, this implementation uses the last known values
+   * set with enableMotors().
    */
 	std::array<int, 2> getMotorConfig() {
-		auto resp = sendCommand("QE", 2);
-		auto lines = split(resp, '\r');
-		checkStatus(lines);
+		try {
+			// Store the last used configuration to support all firmware versions
+			static std::array<int, 2> lastKnownConfig = { MOTOR_STEP_DIV16, MOTOR_STEP_DIV16 };
 
-		auto modes = split(lines[0], ',');
-		std::map<int, int> mapping = {
-			{ 0, MOTOR_DISABLE },
-			{ 1, MOTOR_STEP_DIV1 },
-			{ 2, MOTOR_STEP_DIV2 },
-			{ 4, MOTOR_STEP_DIV4 },
-			{ 8, MOTOR_STEP_DIV8 },
-			{ 16, MOTOR_STEP_DIV16 }
-		};
+			// Try to query the motor status using QM command
+			// This is more broadly supported than QE and can indicate if motors are enabled
+			auto resp = sendCommand("QM", 1, 1000); // Shorter timeout for better user experience
+			auto parts = split(resp, ',');
 
-		return {
-			mapping.at(std::stoi(modes[0])),
-			mapping.at(std::stoi(modes[1]))
-		};
+			if (parts.size() >= 4) {
+				// QM returns motor status but not microstep mode
+				// We can at least detect if motors are enabled/disabled
+				bool motor1Enabled = parts[2] == "1";
+				bool motor2Enabled = parts[3] == "1";
+
+				// If motors are disabled, update our cached values
+				if (!motor1Enabled) {
+					lastKnownConfig[0] = MOTOR_DISABLE;
+				}
+				if (!motor2Enabled) {
+					lastKnownConfig[1] = MOTOR_DISABLE;
+				}
+			}
+
+			return lastKnownConfig;
+		} catch (const std::exception & e) {
+			// Return default values if there's an error
+			return { MOTOR_STEP_DIV16, MOTOR_STEP_DIV16 };
+		}
 	}
 
 	/**
@@ -565,7 +601,7 @@ public:
    */
 	int getLayer() {
 		auto resp = sendCommand("QL", 2);
-		auto lines = split(resp, '\r');
+		auto lines = split(resp, '\n');
 		checkStatus(lines);
 		return std::stoi(lines[0]);
 	}
@@ -590,12 +626,32 @@ public:
 
 	/**
    * Query pen state (QP).
+   * @returns True if pen is in down position (0), false if up (1).
    */
 	bool isPenDown() {
-		auto resp = sendCommand("QP", 2);
-		auto lines = split(resp, '\r');
-		checkStatus(lines);
-		return std::stoi(lines[0]) == PEN_DOWN;
+		try {
+			// The QP command returns: "PenStatus\r\nOK\r\n"
+			auto resp = sendCommand("QP", 2);
+			auto lines = split(resp, '\n');
+
+			// Check for valid response format
+			if (lines.size() < 2) {
+				throw std::runtime_error("Incomplete response from QP command");
+			}
+
+			// Check if the second line is "OK"
+			if (lines[1] != "OK") {
+				throw std::runtime_error("Invalid QP response format: " + resp);
+			}
+
+			// Pen state is 0 (down) or 1 (up)
+			int penState = std::stoi(lines[0]);
+			return penState == PEN_DOWN; // PEN_DOWN = 0
+		} catch (const std::exception & e) {
+			// Log the error and default to assuming pen is up (safer)
+			ofLogError("ofxEbbControl") << "Error querying pen state: " << e.what();
+			return false;
+		}
 	}
 
 	/**
@@ -603,7 +659,7 @@ public:
    */
 	bool isServoPowered() {
 		auto resp = sendCommand("QR", 2);
-		auto lines = split(resp, '\r');
+		auto lines = split(resp, '\n');
 		checkStatus(lines);
 		return std::stoi(lines[0]) == SERVO_POWER_ON;
 	}
@@ -613,10 +669,15 @@ public:
    */
 	std::array<int, 2> getStepPositions() {
 		auto resp = sendCommand("QS", 2);
-		auto lines = split(resp, '\r');
+		auto lines = split(resp, '\n');
 		checkStatus(lines);
 
-		auto s = split(lines[0], ',');
+		// According to EBB documentation, the step positions are space-separated
+		auto s = split(lines[0], ' ');
+		if (s.size() < 2) {
+			throw std::runtime_error("Invalid step position response format: " + lines[0]);
+		}
+
 		return { std::stoi(s[0]), std::stoi(s[1]) };
 	}
 
@@ -625,7 +686,7 @@ public:
    */
 	std::string getNickname() {
 		auto resp = sendCommand("QT", 2);
-		auto lines = split(resp, '\r');
+		auto lines = split(resp, '\n');
 		checkStatus(lines);
 		return lines[0];
 	}
@@ -745,8 +806,16 @@ private:
 	}
 
 	static void checkStatus(const std::vector<std::string> & lines) {
-		if (lines.size() < 2 || lines[1] != "OK") {
-			throw std::runtime_error("Bad status response");
+		if (lines.size() < 2) {
+			throw std::runtime_error("Incomplete response, expected at least 2 lines");
+		}
+
+		if (lines[1] != "OK") {
+			std::string errorMsg = "Bad status response: " + lines[1];
+			if (!lines.empty()) {
+				errorMsg += " (data: " + lines[0] + ")";
+			}
+			throw std::runtime_error(errorMsg);
 		}
 	}
 
@@ -799,6 +868,10 @@ private:
 		std::string item;
 
 		while (std::getline(ss, item, delim)) {
+			// Handle CR+LF line endings by removing trailing CR
+			if (!item.empty() && item.back() == '\r') {
+				item.pop_back();
+			}
 			out.push_back(item);
 		}
 		return out;
@@ -809,10 +882,24 @@ private:
 		...) {
 		va_list args;
 		va_start(args, fmt);
-		int size = std::vsnprintf(nullptr, 0, fmt, args) + 1;
+
+		// Get required buffer size
+		va_list args_copy;
+		va_copy(args_copy, args);
+		int size = std::vsnprintf(nullptr, 0, fmt, args_copy) + 1;
+		va_end(args_copy);
+
+		// Format the string
 		std::vector<char> buf(size);
 		std::vsnprintf(buf.data(), size, fmt, args);
 		va_end(args);
+
 		return std::string(buf.data());
+	}
+
+	// Helper method to maintain motor configuration state across the class
+	static std::array<int, 2> & getLastKnownMotorConfig() {
+		static std::array<int, 2> lastKnownConfig = { MOTOR_STEP_DIV16, MOTOR_STEP_DIV16 };
+		return lastKnownConfig;
 	}
 };
