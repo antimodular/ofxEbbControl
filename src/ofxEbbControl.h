@@ -1020,6 +1020,106 @@ public:
 		checkOk(resp);
 	}
 
+	/**
+   * Configure stepper and servo modes (SC).
+   * @param paramIndex The parameter index to set (1, 2, 4, 5, 8, 9, 10, 11, 12, 13)
+   * @param paramValue The value to set (varies by parameter)
+   * 
+   * Parameter indices:
+   * 1: Pen lift mechanism (0-2)
+   * 2: Stepper signal control (0-2)
+   * 4: Servo min position (1-65535)
+   * 5: Servo max position (1-65535)
+   * 8: Number of RC channels (1-24)
+   * 9: S2 channel duration (1-6)
+   * 10: Default servo rate (0-65535)
+   * 11: Servo rate up (0-65535)
+   * 12: Servo rate down (0-65535)
+   * 13: Alternate pause button function (0-1)
+   */
+	void stepperAndServoModeConfigure(
+		int paramIndex,
+		int paramValue) {
+		std::string cmd;
+		
+		switch (paramIndex) {
+			case 1: // Pen lift mechanism
+				if (paramValue < 0 || paramValue > 2) {
+					throw std::runtime_error("Parameter value must be between 0 and 2");
+				}
+				cmd = "SC,1," + toStr(paramValue);
+				break;
+				
+			case 2: // Stepper signal control
+				if (paramValue < 0 || paramValue > 2) {
+					throw std::runtime_error("Parameter value must be between 0 and 2");
+				}
+				cmd = "SC,2," + toStr(paramValue);
+				break;
+				
+			case 4: // Servo min
+				if (paramValue < 1 || paramValue > 65535) {
+					throw std::runtime_error("Parameter value must be between 1 and 65535");
+				}
+				cmd = "SC,4," + toStr(paramValue);
+				break;
+				
+			case 5: // Servo max
+				if (paramValue < 1 || paramValue > 65535) {
+					throw std::runtime_error("Parameter value must be between 1 and 65535");
+				}
+				cmd = "SC,5," + toStr(paramValue);
+				break;
+				
+			case 8: // Number of RC channels
+				if (paramValue < 1 || paramValue > 24) {
+					throw std::runtime_error("Parameter value must be between 1 and 24");
+				}
+				cmd = "SC,8," + toStr(paramValue);
+				break;
+				
+			case 9: // S2 channel duration
+				if (paramValue < 1 || paramValue > 6) {
+					throw std::runtime_error("Parameter value must be between 1 and 6");
+				}
+				cmd = "SC,9," + toStr(paramValue);
+				break;
+				
+			case 10: // Default servo rate
+				if (paramValue < 0 || paramValue > 65535) {
+					throw std::runtime_error("Parameter value must be between 0 and 65535");
+				}
+				cmd = "SC,10," + toStr(paramValue);
+				break;
+				
+			case 11: // Servo rate up
+				if (paramValue < 0 || paramValue > 65535) {
+					throw std::runtime_error("Parameter value must be between 0 and 65535");
+				}
+				cmd = "SC,11," + toStr(paramValue);
+				break;
+				
+			case 12: // Servo rate down
+				if (paramValue < 0 || paramValue > 65535) {
+					throw std::runtime_error("Parameter value must be between 0 and 65535");
+				}
+				cmd = "SC,12," + toStr(paramValue);
+				break;
+				
+			case 13: // Alternate pause button function
+				if (paramValue < 0 || paramValue > 1) {
+					throw std::runtime_error("Parameter value must be between 0 and 1");
+				}
+				cmd = "SC,13," + toStr(paramValue);
+				break;
+				
+			default:
+				throw std::runtime_error("Parameter index " + toStr(paramIndex) + " not allowed");
+		}
+		
+		auto resp = sendCommand(cmd);
+		checkOk(resp);
+	}
 private:
 	ofSerial serial;
 	std::string serialPort;
