@@ -1,7 +1,10 @@
 // ofxEbbControl.h
 #pragma once
 
+// Use the full path for OpenFrameworks headers
+#include "ofLog.h"
 #include "ofSerial.h"
+#include "ofUtils.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -14,6 +17,12 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+// Utility function for clamping values (in case ofClamp is not available)
+template <typename T>
+T clampValue(const T & value, const T & min, const T & max) {
+	return value < min ? min : (value > max ? max : value);
+}
 
 /**
  * ofxEbbControl: OpenFrameworks-style addon for EiBotBoard/EggBot control.
@@ -111,7 +120,8 @@ public:
 		// Wait a tiny bit for the command to be processed
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-		// Special handling for the version command which doesn't return an OK
+		// Special handling for certain commands
+		// The 'V' command returns the version string without any OK
 		if (cmd == "V") {
 			// The V command returns the version string without any OK
 			std::string responseBuffer;
@@ -144,6 +154,90 @@ public:
 					}
 				}
 			}
+
+			ofLogNotice("ofxEbbControl") << "Raw response: '" << responseBuffer << "'";
+			return responseBuffer;
+		}
+		// Special handling for the QG command which returns a hex value without OK
+		else if (cmd == "QG") {
+			std::string responseBuffer;
+			auto start = std::chrono::steady_clock::now();
+
+			// Read response until we get a complete hex value (usually 2 characters)
+			while (responseBuffer.length() < 2 || !isxdigit(responseBuffer[0]) || !isxdigit(responseBuffer[1])) {
+				// Check for timeout
+				auto now = std::chrono::steady_clock::now();
+				if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > timeoutMs) {
+					ofLogError("ofxEbbControl") << "Command '" << cmd << "' timed out after " << timeoutMs << "ms";
+					ofLogError("ofxEbbControl") << "Partial response: '" << responseBuffer << "'";
+					throw std::runtime_error("Command '" + cmd + "' timed out");
+				}
+
+				// Read available data
+				if (serial.available() > 0) {
+					unsigned char ch;
+					if (serial.readBytes(&ch, 1) > 0) {
+						if (ch != '\r' && ch != '\n') { // Skip CR/LF
+							responseBuffer.push_back(static_cast<char>(ch));
+						}
+					}
+				} else {
+					// Still waiting for data
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+
+				// If we've collected some data but no more is coming, assume we're done
+				if (!responseBuffer.empty() && serial.available() == 0 && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() > 100) {
+					break;
+				}
+			}
+
+			ofLogNotice("ofxEbbControl") << "Raw response: '" << responseBuffer << "'";
+			return responseBuffer;
+		}
+		// Special handling for QM command which returns data in format "QM,a,b,c,d\r\n"
+		else if (cmd == "QM") {
+			std::string responseBuffer;
+			auto start = std::chrono::steady_clock::now();
+			bool responseComplete = false;
+
+			while (!responseComplete) {
+				// Check for timeout
+				auto now = std::chrono::steady_clock::now();
+				if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > timeoutMs) {
+					ofLogError("ofxEbbControl") << "Command '" << cmd << "' timed out after " << timeoutMs << "ms";
+					ofLogError("ofxEbbControl") << "Partial response: '" << responseBuffer << "'";
+					throw std::runtime_error("Command '" + cmd + "' timed out");
+				}
+
+				// Read available data
+				if (serial.available() > 0) {
+					unsigned char ch;
+					if (serial.readBytes(&ch, 1) > 0) {
+						responseBuffer.push_back(static_cast<char>(ch));
+
+						// Look for "\r\n" or "\n" as end of QM response
+						if ((responseBuffer.length() >= 2 && responseBuffer[responseBuffer.length() - 2] == '\r' && responseBuffer[responseBuffer.length() - 1] == '\n') || (responseBuffer.length() >= 1 && responseBuffer[responseBuffer.length() - 1] == '\n')) {
+							responseComplete = true;
+						}
+					}
+				} else {
+					// No data available right now
+
+					// If we've already received "QM," and have at least 7 characters (QM,0,0,0,0)
+					// and there's been no data for a while, consider the response complete
+					if (responseBuffer.find("QM,") == 0 && responseBuffer.length() >= 7 && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() > 100) {
+						responseComplete = true;
+					} else {
+						// Keep waiting for more data
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					}
+				}
+			}
+
+			// Clean up the response - remove CR/LF and trim whitespace
+			responseBuffer.erase(std::remove(responseBuffer.begin(), responseBuffer.end(), '\r'), responseBuffer.end());
+			responseBuffer.erase(std::remove(responseBuffer.begin(), responseBuffer.end(), '\n'), responseBuffer.end());
 
 			ofLogNotice("ofxEbbControl") << "Raw response: '" << responseBuffer << "'";
 			return responseBuffer;
@@ -187,7 +281,7 @@ public:
 		ofLogNotice("ofxEbbControl") << "Raw response: '" << responseBuffer << "'";
 
 		// Process the response based on the command
-		if (cmd == "QP") {
+		if (cmd.substr(0, 2) == "QP") {
 			// QP returns pen status (0=down, 1=up)
 			// Format might be "0OK" or "1OK" with no separation
 			if (responseBuffer.find("0OK") != std::string::npos) {
@@ -195,7 +289,7 @@ public:
 			} else {
 				return "1"; // Pen up
 			}
-		} else if (cmd == "QS") {
+		} else if (cmd.substr(0, 2) == "QS") {
 			// QS returns step positions, typically "0,0OK"
 			std::string stepPos = responseBuffer;
 			size_t okPos = stepPos.find("OK");
@@ -212,7 +306,7 @@ public:
 			}
 
 			return cleaned;
-		} else if (cmd == "QT") {
+		} else if (cmd.substr(0, 2) == "QT") {
 			// QT returns nickname
 			std::string nickname = responseBuffer;
 			size_t okPos = nickname.find("OK");
@@ -230,14 +324,14 @@ public:
 			}
 
 			return nickname;
-		} else if (cmd == "QB") {
+		} else if (cmd.substr(0, 2) == "QB") {
 			// QB returns button status (0=not pressed, 1=pressed)
 			if (responseBuffer.find("1OK") != std::string::npos) {
 				return "1";
 			} else {
 				return "0";
 			}
-		} else if (cmd == "QC") {
+		} else if (cmd.substr(0, 2) == "QC") {
 			// QC returns current and voltage readings
 			std::string values = responseBuffer;
 			size_t okPos = values.find("OK");
@@ -254,13 +348,27 @@ public:
 			}
 
 			return cleaned;
-		} else if (cmd == "QR") {
+		} else if (cmd.substr(0, 2) == "QR") {
 			// QR returns servo power status
 			if (responseBuffer.find("1OK") != std::string::npos) {
 				return "1";
 			} else {
 				return "0";
 			}
+		} else if (cmd.substr(0, 2) == "QN") {
+			// QN returns node count
+			std::string nodeCount = responseBuffer;
+			size_t okPos = nodeCount.find("OK");
+			if (okPos != std::string::npos) {
+				nodeCount = nodeCount.substr(0, okPos);
+			}
+
+			// Clean up the node count
+			nodeCount.erase(std::remove_if(nodeCount.begin(), nodeCount.end(),
+								[](unsigned char c) { return !isdigit(c); }),
+				nodeCount.end());
+
+			return nodeCount;
 		} else if (responseBuffer == "OK" || responseBuffer.find("OK") != std::string::npos) {
 			// For commands that just return OK
 			return "OK";
@@ -707,7 +815,7 @@ public:
 	/**
    * Query the EBB firmware version (QV).
    */
-	std::string getFirmewareVersion() {
+	std::string getFirmwareVersion() {
 		std::string resp = sendCommand("V");
 		return resp;
 	}
@@ -931,6 +1039,30 @@ public:
 	}
 
 	/**
+   * Set this EBB's nickname.
+   * See {@link https://evil-mad.github.io/EggBot/ebb.html#ST}.
+   * @param nickname New nickname (maximum 16 characters).
+   * @returns True if successful.
+   */
+	bool setNickname(const std::string & nickname) {
+		try {
+			if (nickname.length() > 16) {
+				ofLogWarning("ofxEbbControl") << "Nickname too long, truncating to 16 characters";
+			}
+
+			// Truncate to 16 characters if needed
+			std::string truncated = nickname.substr(0, 16);
+
+			auto cmd = "ST," + truncated;
+			auto resp = sendCommand(cmd);
+			return resp == "OK";
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error setting nickname: " << e.what();
+			return false;
+		}
+	}
+
+	/**
    * Reboot EBB (RB).
    */
 	void reboot() {
@@ -1024,7 +1156,7 @@ public:
    * Configure stepper and servo modes (SC).
    * @param paramIndex The parameter index to set (1, 2, 4, 5, 8, 9, 10, 11, 12, 13)
    * @param paramValue The value to set (varies by parameter)
-   * 
+   *
    * Parameter indices:
    * 1: Pen lift mechanism (0-2)
    * 2: Stepper signal control (0-2)
@@ -1041,88 +1173,278 @@ public:
 		int paramIndex,
 		int paramValue) {
 		std::string cmd;
-		
+
 		switch (paramIndex) {
-			case 1: // Pen lift mechanism
-				if (paramValue < 0 || paramValue > 2) {
-					throw std::runtime_error("Parameter value must be between 0 and 2");
-				}
-				cmd = "SC,1," + toStr(paramValue);
-				break;
-				
-			case 2: // Stepper signal control
-				if (paramValue < 0 || paramValue > 2) {
-					throw std::runtime_error("Parameter value must be between 0 and 2");
-				}
-				cmd = "SC,2," + toStr(paramValue);
-				break;
-				
-			case 4: // Servo min
-				if (paramValue < 1 || paramValue > 65535) {
-					throw std::runtime_error("Parameter value must be between 1 and 65535");
-				}
-				cmd = "SC,4," + toStr(paramValue);
-				break;
-				
-			case 5: // Servo max
-				if (paramValue < 1 || paramValue > 65535) {
-					throw std::runtime_error("Parameter value must be between 1 and 65535");
-				}
-				cmd = "SC,5," + toStr(paramValue);
-				break;
-				
-			case 8: // Number of RC channels
-				if (paramValue < 1 || paramValue > 24) {
-					throw std::runtime_error("Parameter value must be between 1 and 24");
-				}
-				cmd = "SC,8," + toStr(paramValue);
-				break;
-				
-			case 9: // S2 channel duration
-				if (paramValue < 1 || paramValue > 6) {
-					throw std::runtime_error("Parameter value must be between 1 and 6");
-				}
-				cmd = "SC,9," + toStr(paramValue);
-				break;
-				
-			case 10: // Default servo rate
-				if (paramValue < 0 || paramValue > 65535) {
-					throw std::runtime_error("Parameter value must be between 0 and 65535");
-				}
-				cmd = "SC,10," + toStr(paramValue);
-				break;
-				
-			case 11: // Servo rate up
-				if (paramValue < 0 || paramValue > 65535) {
-					throw std::runtime_error("Parameter value must be between 0 and 65535");
-				}
-				cmd = "SC,11," + toStr(paramValue);
-				break;
-				
-			case 12: // Servo rate down
-				if (paramValue < 0 || paramValue > 65535) {
-					throw std::runtime_error("Parameter value must be between 0 and 65535");
-				}
-				cmd = "SC,12," + toStr(paramValue);
-				break;
-				
-			case 13: // Alternate pause button function
-				if (paramValue < 0 || paramValue > 1) {
-					throw std::runtime_error("Parameter value must be between 0 and 1");
-				}
-				cmd = "SC,13," + toStr(paramValue);
-				break;
-				
-			default:
-				throw std::runtime_error("Parameter index " + toStr(paramIndex) + " not allowed");
+		case 1: // Pen lift mechanism
+			if (paramValue < 0 || paramValue > 2) {
+				throw std::runtime_error("Parameter value must be between 0 and 2");
+			}
+			cmd = "SC,1," + toStr(paramValue);
+			break;
+
+		case 2: // Stepper signal control
+			if (paramValue < 0 || paramValue > 2) {
+				throw std::runtime_error("Parameter value must be between 0 and 2");
+			}
+			cmd = "SC,2," + toStr(paramValue);
+			break;
+
+		case 4: // Servo min
+			if (paramValue < 1 || paramValue > 65535) {
+				throw std::runtime_error("Parameter value must be between 1 and 65535");
+			}
+			cmd = "SC,4," + toStr(paramValue);
+			break;
+
+		case 5: // Servo max
+			if (paramValue < 1 || paramValue > 65535) {
+				throw std::runtime_error("Parameter value must be between 1 and 65535");
+			}
+			cmd = "SC,5," + toStr(paramValue);
+			break;
+
+		case 8: // Number of RC channels
+			if (paramValue < 1 || paramValue > 24) {
+				throw std::runtime_error("Parameter value must be between 1 and 24");
+			}
+			cmd = "SC,8," + toStr(paramValue);
+			break;
+
+		case 9: // S2 channel duration
+			if (paramValue < 1 || paramValue > 6) {
+				throw std::runtime_error("Parameter value must be between 1 and 6");
+			}
+			cmd = "SC,9," + toStr(paramValue);
+			break;
+
+		case 10: // Default servo rate
+			if (paramValue < 0 || paramValue > 65535) {
+				throw std::runtime_error("Parameter value must be between 0 and 65535");
+			}
+			cmd = "SC,10," + toStr(paramValue);
+			break;
+
+		case 11: // Servo rate up
+			if (paramValue < 0 || paramValue > 65535) {
+				throw std::runtime_error("Parameter value must be between 0 and 65535");
+			}
+			cmd = "SC,11," + toStr(paramValue);
+			break;
+
+		case 12: // Servo rate down
+			if (paramValue < 0 || paramValue > 65535) {
+				throw std::runtime_error("Parameter value must be between 0 and 65535");
+			}
+			cmd = "SC,12," + toStr(paramValue);
+			break;
+
+		case 13: // Alternate pause button function
+			if (paramValue < 0 || paramValue > 1) {
+				throw std::runtime_error("Parameter value must be between 0 and 1");
+			}
+			cmd = "SC,13," + toStr(paramValue);
+			break;
+
+		default:
+			throw std::runtime_error("Parameter index " + toStr(paramIndex) + " not allowed");
 		}
-		
+
 		auto resp = sendCommand(cmd);
 		checkOk(resp);
 	}
+
+	/**
+   * List available serial devices.
+   * @returns A vector of device paths that might be EBB controllers.
+   */
+	std::vector<std::string> listDevices() {
+		std::vector<std::string> devices;
+		auto deviceList = serial.getDeviceList();
+
+		for (auto & device : deviceList) {
+			devices.push_back(device.getDevicePath());
+		}
+
+		return devices;
+	}
+
+	/**
+   * Disable both stepper motors.
+   * @returns True if successful.
+   */
+	bool disableMotors() {
+		try {
+			enableMotors(MOTOR_DISABLE, MOTOR_DISABLE);
+			return true;
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error disabling motors: " << e.what();
+			return false;
+		}
+	}
+
+	/**
+   * Move stepper motors with simple step commands.
+   * @param durationMs Duration of movement in milliseconds.
+   * @param steps1 Steps for motor 1.
+   * @param steps2 Steps for motor 2.
+   * @returns True if successful.
+   */
+	bool moveStepperSteps(int durationMs, int steps1, int steps2) {
+		try {
+			std::string cmd = "SM," + toStr(durationMs) + "," + toStr(steps1) + "," + toStr(steps2);
+			auto resp = sendCommand(cmd);
+			return resp == "OK";
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error in stepper move: " << e.what();
+			return false;
+		}
+	}
+
+	/**
+   * Set servo power timeout.
+   * @param durationMs Timeout in milliseconds (0 = no timeout).
+   * @param powerOn Whether to enable power now.
+   * @returns True if successful.
+   */
+	bool setServoPowerTimeout(int durationMs, bool powerOn) {
+		try {
+			auto cmd = "SR," + toStr(durationMs) + "," + toStr(powerOn ? 1 : 0);
+			auto resp = sendCommand(cmd);
+			return resp == "OK";
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error setting servo power timeout: " << e.what();
+			return false;
+		}
+	}
+
+	/**
+   * Get current node count.
+   * @returns Current node count value.
+   */
+	uint32_t getNodeCount() {
+		try {
+			auto resp = sendCommand("QN", 2);
+			// Remove the "OK" from the response
+			if (resp.find("OK") != std::string::npos) {
+				resp = resp.substr(0, resp.find("OK"));
+			}
+
+			// Clean the string to contain only numbers
+			std::string cleaned;
+			for (char c : resp) {
+				if (isdigit(c)) {
+					cleaned += c;
+				}
+			}
+
+			if (cleaned.empty()) {
+				return 0;
+			}
+
+			return static_cast<uint32_t>(std::stoul(cleaned));
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error getting node count: " << e.what();
+			return 0;
+		}
+	}
+
+	/**
+   * Set node counter value.
+   * @param value New count value (0-2^32).
+   * @returns True if successful.
+   */
+	bool setNodeCount(uint32_t value) {
+		try {
+			auto cmd = "SN," + toStr(value);
+			auto resp = sendCommand(cmd);
+			return resp == "OK";
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error setting node count: " << e.what();
+			return false;
+		}
+	}
+
+	/**
+   * Set engraver state and power.
+   * @param enable True to enable, false to disable.
+   * @param power Power level (0-1023).
+   * @param useMotionQueue Whether to use motion queue for this command.
+   * @returns True if successful.
+   */
+	bool setEngraver(bool enable, int power, bool useMotionQueue) {
+		try {
+			if (power < 0 || power > 1023) {
+				power = ofClamp(power, 0, 1023);
+			}
+
+			auto cmd = "SE," + toStr(enable ? 1 : 0) + "," + toStr(power) + "," + toStr(useMotionQueue ? 1 : 0);
+			auto resp = sendCommand(cmd);
+			return resp == "OK";
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error setting engraver: " << e.what();
+			return false;
+		}
+	}
+
+	/**
+   * Direct servo output control.
+   * @param position Servo position (0-65535, typically 5000-10000 range is usable).
+   * @param servoChannel Servo channel to control.
+   * @param rate Optional rate parameter for servo movement.
+   * @param delay Optional delay in milliseconds.
+   * @returns True if successful.
+   */
+	bool servoOutput(int position, int servoChannel, int rate = 0, int delay = 0) {
+		try {
+			std::string cmd = "S2," + toStr(position) + "," + toStr(servoChannel);
+
+			if (rate > 0) {
+				cmd += "," + toStr(rate);
+				if (delay > 0) {
+					cmd += "," + toStr(delay);
+				}
+			}
+
+			auto resp = sendCommand(cmd);
+			return resp == "OK";
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error in servo output: " << e.what();
+			return false;
+		}
+	}
+
+	/**
+   * Set layer value.
+   * @param layer Layer value (0-127).
+   * @returns True if successful.
+   */
+	bool setLayer(int layer) {
+		try {
+			if (layer < 0 || layer > 127) {
+				layer = ofClamp(layer, 0, 127);
+			}
+
+			auto cmd = "SL," + toStr(layer);
+			auto resp = sendCommand(cmd);
+			return resp == "OK";
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error setting layer: " << e.what();
+			return false;
+		}
+	}
+
+	// Get steps per mm calibration
+	float getStepsPerMm() const {
+		return stepsPerMm;
+	}
+
 private:
+	// Serial connection
 	ofSerial serial;
 	std::string serialPort;
+
+	// Configuration values
+	float stepsPerMm = 80.0f;
 
 	//-- Internal helpers -------------------------------------------
 
@@ -1240,5 +1562,57 @@ private:
 	static std::array<int, 2> & getLastKnownMotorConfig() {
 		static std::array<int, 2> lastKnownConfig = { MOTOR_STEP_DIV16, MOTOR_STEP_DIV16 };
 		return lastKnownConfig;
+	}
+
+	/**
+	 * @brief Check if motors are currently moving or if a motion command is executing
+	 *
+	 * This is a convenience method that calls the QM (Query Motors) command
+	 * and returns true if either a motion command is executing or
+	 * any of the motors are moving.
+	 *
+	 * @return true if motors are moving or a motion command is executing
+	 * @return false if motors are not moving and no motion command is executing
+	 */
+	bool isMoving() {
+		try {
+			std::string response = sendCommand("QM");
+
+			// Expected format: QM,a,b,c,d where:
+			// a: 1 if command executing, 0 if not
+			// b: 1 if motor 1 is moving, 0 if not
+			// c: 1 if motor 2 is moving, 0 if not
+			// d: 1 if FIFO not empty, 0 if empty
+
+			if (response.find("QM,") != 0) {
+				ofLogError("ofxEbbControl") << "Invalid response to QM command: " << response;
+				return false;
+			}
+
+			// Split response by commas
+			std::vector<std::string> parts;
+			std::istringstream ss(response);
+			std::string part;
+
+			while (std::getline(ss, part, ',')) {
+				parts.push_back(part);
+			}
+
+			if (parts.size() < 4) {
+				ofLogError("ofxEbbControl") << "Invalid QM response format, expected at least 4 parts: " << response;
+				return false;
+			}
+
+			// Check if command executing or any motor moving
+			bool cmdExecuting = (parts[1] == "1");
+			bool motor1Moving = (parts[2] == "1");
+			bool motor2Moving = (parts[3] == "1");
+
+			return cmdExecuting || motor1Moving || motor2Moving;
+
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error in isMoving(): " << e.what();
+			return false;
+		}
 	}
 };
