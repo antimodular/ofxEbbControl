@@ -86,71 +86,196 @@ public:
 
 	/**
    * Send a raw command to EBB, read a specified number of lines, or timeout.
+   * This implementation handles the specific response patterns of the EBB controller.
    * @param cmd        Command string (without CR).
    * @param numLines   Number of response lines to read (default 1).
    * @param timeoutMs  Timeout in milliseconds (default 3000).
-   * @returns          Concatenated response lines separated by CRLF.
+   * @returns          Concatenated response lines separated by newlines.
    * @throws           runtime_error if timeout or communication error.
    */
 	std::string sendCommand(
 		const std::string & cmd,
 		int numLines = 1,
 		int timeoutMs = 3000) {
-		// Transmit command with CR
-		std::string out = cmd + "\r";
-		serial.writeBytes(
-			reinterpret_cast<const unsigned char *>(out.c_str()),
-			out.size());
+		// First clear any existing data in the buffer
+		unsigned char buffer[256];
+		while (serial.available() > 0) {
+			serial.readBytes(buffer, std::min(256, serial.available()));
+		}
 
-		// Read response
-		std::string result;
-		auto start = std::chrono::steady_clock::now();
-		
-		// Use a buffered approach similar to the JavaScript implementation
-		std::string responseBuffer;
-		int linesFound = 0;
-		
-		// While we still need more lines and haven't timed out
-		while (linesFound < numLines) {
-			char ch;
-			int bytesRead = serial.readBytes(reinterpret_cast<unsigned char *>(&ch), 1);
-			
-			if (bytesRead > 0) {
-				responseBuffer.push_back(ch);
-				
-				// Check if we've found a complete line (CR+LF sequence)
-				if (responseBuffer.size() >= 2 && 
-					responseBuffer[responseBuffer.size()-2] == '\r' && 
-					responseBuffer[responseBuffer.size()-1] == '\n') {
-					linesFound++;
-					
-					// Extract the line without CR+LF
-					std::string line = responseBuffer.substr(0, responseBuffer.size()-2);
-					responseBuffer.clear();
-					
-					// Add to result, with newline separator if needed
-					if (!result.empty()) {
-						result += "\n";
-					}
-					result += line;
-					
-					if (linesFound >= numLines) {
-						break; // We've got all the lines we need
-					}
-				}
-			} else {
+		// Send the command with CR
+		std::string out = cmd + "\r";
+		ofLogNotice("ofxEbbControl") << "Sending: '" << cmd << "'";
+		serial.writeBytes(reinterpret_cast<const unsigned char *>(out.c_str()), out.size());
+
+		// Wait a tiny bit for the command to be processed
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+		// Special handling for the version command which doesn't return an OK
+		if (cmd == "V") {
+			// The V command returns the version string without any OK
+			std::string responseBuffer;
+			auto start = std::chrono::steady_clock::now();
+			bool receivedResponse = false;
+
+			// Give it some time to receive the complete version string
+			while (!receivedResponse) {
 				// Check for timeout
 				auto now = std::chrono::steady_clock::now();
 				if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > timeoutMs) {
+					ofLogError("ofxEbbControl") << "Command '" << cmd << "' timed out after " << timeoutMs << "ms";
+					ofLogError("ofxEbbControl") << "Partial response: '" << responseBuffer << "'";
 					throw std::runtime_error("Command '" + cmd + "' timed out");
 				}
-				
-				// Avoid busy waiting
-				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+				// Read available data
+				if (serial.available() > 0) {
+					unsigned char ch;
+					if (serial.readBytes(&ch, 1) > 0) {
+						responseBuffer.push_back(static_cast<char>(ch));
+					}
+				} else {
+					// No more data available and we've got some response
+					if (!responseBuffer.empty() && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() > 100) {
+						receivedResponse = true; // We've waited long enough after receiving data
+					} else {
+						// Still waiting for data
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					}
+				}
+			}
+
+			ofLogNotice("ofxEbbControl") << "Raw response: '" << responseBuffer << "'";
+			return responseBuffer;
+		}
+
+		// For all other commands, read the entire response into a buffer
+		std::string responseBuffer;
+		auto start = std::chrono::steady_clock::now();
+		bool foundOK = false;
+
+		// Read response until we have the OK marker or timeout
+		while (!foundOK) {
+			// Check for timeout
+			auto now = std::chrono::steady_clock::now();
+			if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > timeoutMs) {
+				ofLogError("ofxEbbControl") << "Command '" << cmd << "' timed out after " << timeoutMs << "ms";
+				ofLogError("ofxEbbControl") << "Partial response: '" << responseBuffer << "'";
+				throw std::runtime_error("Command '" + cmd + "' timed out");
+			}
+
+			// Read available data one byte at a time for more careful control
+			unsigned char ch;
+			if (serial.available() > 0) {
+				if (serial.readBytes(&ch, 1) > 0) {
+					responseBuffer.push_back(static_cast<char>(ch));
+
+					// Check for OK in the response
+					if (responseBuffer.size() >= 2) {
+						size_t pos = responseBuffer.find("OK");
+						if (pos != std::string::npos) {
+							foundOK = true;
+						}
+					}
+				}
+			} else {
+				// No data available, wait a tiny bit
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			}
 		}
 
-		return result;
+		ofLogNotice("ofxEbbControl") << "Raw response: '" << responseBuffer << "'";
+
+		// Process the response based on the command
+		if (cmd == "QP") {
+			// QP returns pen status (0=down, 1=up)
+			// Format might be "0OK" or "1OK" with no separation
+			if (responseBuffer.find("0OK") != std::string::npos) {
+				return "0"; // Pen down
+			} else {
+				return "1"; // Pen up
+			}
+		} else if (cmd == "QS") {
+			// QS returns step positions, typically "0,0OK"
+			std::string stepPos = responseBuffer;
+			size_t okPos = stepPos.find("OK");
+			if (okPos != std::string::npos) {
+				stepPos = stepPos.substr(0, okPos);
+			}
+
+			// Strip any non-numeric/comma characters
+			std::string cleaned;
+			for (char c : stepPos) {
+				if (isdigit(c) || c == ',' || c == '-') {
+					cleaned += c;
+				}
+			}
+
+			return cleaned;
+		} else if (cmd == "QT") {
+			// QT returns nickname
+			std::string nickname = responseBuffer;
+			size_t okPos = nickname.find("OK");
+			if (okPos != std::string::npos) {
+				nickname = nickname.substr(0, okPos);
+			}
+
+			// Clean up the nickname
+			nickname.erase(std::remove_if(nickname.begin(), nickname.end(),
+							   [](unsigned char c) { return c == '\r' || c == '\n'; }),
+				nickname.end());
+
+			if (nickname.empty()) {
+				return "EBB Controller";
+			}
+
+			return nickname;
+		} else if (cmd == "QB") {
+			// QB returns button status (0=not pressed, 1=pressed)
+			if (responseBuffer.find("1OK") != std::string::npos) {
+				return "1";
+			} else {
+				return "0";
+			}
+		} else if (cmd == "QC") {
+			// QC returns current and voltage readings
+			std::string values = responseBuffer;
+			size_t okPos = values.find("OK");
+			if (okPos != std::string::npos) {
+				values = values.substr(0, okPos);
+			}
+
+			// Clean up the response to just get the values
+			std::string cleaned;
+			for (char c : values) {
+				if (isdigit(c) || c == ',') {
+					cleaned += c;
+				}
+			}
+
+			return cleaned;
+		} else if (cmd == "QR") {
+			// QR returns servo power status
+			if (responseBuffer.find("1OK") != std::string::npos) {
+				return "1";
+			} else {
+				return "0";
+			}
+		} else if (responseBuffer == "OK" || responseBuffer.find("OK") != std::string::npos) {
+			// For commands that just return OK
+			return "OK";
+		}
+
+		// For any other response, return as-is
+		return responseBuffer;
+	}
+
+	// Helper method to clear any data in the serial buffer
+	void drainSerialBuffer() {
+		unsigned char buffer[256];
+		while (serial.available() > 0) {
+			serial.readBytes(buffer, std::min(256, serial.available()));
+		}
 	}
 
 	//-- Public API Methods ------------------------------------------
@@ -266,17 +391,40 @@ public:
 	};
 	StopInfo emergencyStop(
 		bool disableMotors = false) {
-		auto cmd = disableMotors ? "ES,1" : "ES";
-		auto resp = sendCommand(cmd, 2);
-		auto lines = split(resp, '\n');
-		checkStatus(lines);
+		try {
+			auto cmd = disableMotors ? "ES,1" : "ES";
+			auto resp = sendCommand(cmd, 2);
 
-		auto vals = split(lines[0], ',');
-		return StopInfo {
-			vals[0] == "1",
-			{ std::stoi(vals[1]), std::stoi(vals[2]) },
-			{ std::stoi(vals[3]), std::stoi(vals[4]) }
-		};
+			// Extract the emergency stop data from the response
+			std::string stopData;
+			if (resp.find("OK") != std::string::npos) {
+				stopData = resp.substr(0, resp.find("OK"));
+			} else {
+				stopData = resp;
+			}
+
+			// Clean up and parse the values
+			std::string cleaned;
+			for (char c : stopData) {
+				if (isdigit(c) || c == ',' || c == '-') {
+					cleaned += c;
+				}
+			}
+
+			auto vals = split(cleaned, ',');
+			if (vals.size() < 5) {
+				throw std::runtime_error("Invalid emergency stop response");
+			}
+
+			return StopInfo {
+				vals[0] == "1",
+				{ std::stoi(vals[1]), std::stoi(vals[2]) },
+				{ std::stoi(vals[3]), std::stoi(vals[4]) }
+			};
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error in emergency stop: " << e.what();
+			return StopInfo { false, { 0, 0 }, { 0, 0 } };
+		}
 	}
 
 	/**
@@ -493,10 +641,19 @@ public:
    * @returns True if pressed since last query.
    */
 	bool isButtonPressed() {
-		auto resp = sendCommand("QB", 2);
-		auto lines = split(resp, '\n');
-		checkStatus(lines);
-		return lines[0] == "1";
+		try {
+			auto resp = sendCommand("QB", 2);
+
+			// The QB command should return "0" or "1" followed by "OK"
+			if (resp.find("1") != std::string::npos) {
+				return true; // Button was pressed
+			} else {
+				return false; // Button was not pressed
+			}
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error checking button status: " << e.what();
+			return false;
+		}
 	}
 
 	/**
@@ -508,19 +665,43 @@ public:
 	};
 	CurrentInfo getCurrentInfo(
 		bool oldBoard = false) {
-		auto resp = sendCommand("QC", 2);
-		auto lines = split(resp, '\n');
-		checkStatus(lines);
+		try {
+			auto resp = sendCommand("QC", 2);
 
-		auto vals = split(lines[0], ',');
-		double ra0 = 3.3 * std::stoi(vals[0]) / 1023.0;
-		double vp = 3.3 * std::stoi(vals[1]) / 1023.0;
-		double scale = oldBoard ? (1.0 / 11.0) : (1.0 / 9.2);
+			// Extract the current/voltage values from the response
+			std::string values;
+			if (resp.find("OK") != std::string::npos) {
+				// Get everything before "OK"
+				values = resp.substr(0, resp.find("OK"));
+			} else {
+				values = resp;
+			}
 
-		return {
-			ra0 / 1.76,
-			vp / scale + 0.3
-		};
+			// Clean up and parse the values
+			std::string cleaned;
+			for (char c : values) {
+				if (isdigit(c) || c == ',') {
+					cleaned += c;
+				}
+			}
+
+			auto parts = split(cleaned, ',');
+			if (parts.size() < 2) {
+				throw std::runtime_error("Invalid current info response");
+			}
+
+			double ra0 = 3.3 * std::stoi(parts[0]) / 1023.0;
+			double vp = 3.3 * std::stoi(parts[1]) / 1023.0;
+			double scale = oldBoard ? (1.0 / 11.0) : (1.0 / 9.2);
+
+			return {
+				ra0 / 1.76,
+				vp / scale + 0.3
+			};
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error getting current info: " << e.what();
+			return { 0.0, 0.0 }; // Default values
+		}
 	}
 
 	/**
@@ -600,10 +781,31 @@ public:
    * Query current layer value (QL).
    */
 	int getLayer() {
-		auto resp = sendCommand("QL", 2);
-		auto lines = split(resp, '\n');
-		checkStatus(lines);
-		return std::stoi(lines[0]);
+		try {
+			auto resp = sendCommand("QL", 2);
+
+			// Extract layer value from response
+			std::string layerValue;
+			if (resp.find("OK") != std::string::npos) {
+				layerValue = resp.substr(0, resp.find("OK"));
+			} else {
+				layerValue = resp;
+			}
+
+			// Clean up and parse the value
+			layerValue.erase(std::remove_if(layerValue.begin(), layerValue.end(),
+								 [](unsigned char c) { return !isdigit(c); }),
+				layerValue.end());
+
+			if (layerValue.empty()) {
+				return 0;
+			}
+
+			return std::stoi(layerValue);
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error getting layer: " << e.what();
+			return 0;
+		}
 	}
 
 	/**
@@ -630,27 +832,17 @@ public:
    */
 	bool isPenDown() {
 		try {
-			// The QP command returns: "PenStatus\r\nOK\r\n"
 			auto resp = sendCommand("QP", 2);
-			auto lines = split(resp, '\n');
 
-			// Check for valid response format
-			if (lines.size() < 2) {
-				throw std::runtime_error("Incomplete response from QP command");
+			// Look for "0" or "1" in the response
+			if (resp.find("0") != std::string::npos && resp.find("OK") != std::string::npos) {
+				return true; // Pen is down (0)
+			} else {
+				return false; // Pen is up (1) or we couldn't determine
 			}
-
-			// Check if the second line is "OK"
-			if (lines[1] != "OK") {
-				throw std::runtime_error("Invalid QP response format: " + resp);
-			}
-
-			// Pen state is 0 (down) or 1 (up)
-			int penState = std::stoi(lines[0]);
-			return penState == PEN_DOWN; // PEN_DOWN = 0
 		} catch (const std::exception & e) {
-			// Log the error and default to assuming pen is up (safer)
 			ofLogError("ofxEbbControl") << "Error querying pen state: " << e.what();
-			return false;
+			return false; // Default to assuming pen is up (safer)
 		}
 	}
 
@@ -658,37 +850,84 @@ public:
    * Query servo power status (QR).
    */
 	bool isServoPowered() {
-		auto resp = sendCommand("QR", 2);
-		auto lines = split(resp, '\n');
-		checkStatus(lines);
-		return std::stoi(lines[0]) == SERVO_POWER_ON;
+		try {
+			auto resp = sendCommand("QR", 2);
+
+			// The QR command returns 0 or 1
+			if (resp.find("1") != std::string::npos) {
+				return true; // Servo power is on
+			} else {
+				return false; // Servo power is off
+			}
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error querying servo power: " << e.what();
+			return false; // Default to off
+		}
 	}
 
 	/**
    * Query current step positions (QS).
    */
 	std::array<int, 2> getStepPositions() {
-		auto resp = sendCommand("QS", 2);
-		auto lines = split(resp, '\n');
-		checkStatus(lines);
+		try {
+			auto resp = sendCommand("QS", 2);
 
-		// According to EBB documentation, the step positions are space-separated
-		auto s = split(lines[0], ' ');
-		if (s.size() < 2) {
-			throw std::runtime_error("Invalid step position response format: " + lines[0]);
+			// Extract the step positions from the response (format "0,0OK")
+			std::string stepPos;
+			if (resp.find("OK") != std::string::npos) {
+				stepPos = resp.substr(0, resp.find("OK"));
+			} else {
+				stepPos = resp;
+			}
+
+			// Clean up and parse values
+			std::string cleaned;
+			for (char c : stepPos) {
+				if (isdigit(c) || c == ',' || c == '-') {
+					cleaned += c;
+				}
+			}
+
+			auto values = split(cleaned, ',');
+			if (values.size() >= 2) {
+				return { std::stoi(values[0]), std::stoi(values[1]) };
+			} else {
+				return { 0, 0 };
+			}
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error querying step positions: " << e.what();
+			return { 0, 0 };
 		}
-
-		return { std::stoi(s[0]), std::stoi(s[1]) };
 	}
 
 	/**
    * Query EBB nickname (QT).
    */
 	std::string getNickname() {
-		auto resp = sendCommand("QT", 2);
-		auto lines = split(resp, '\n');
-		checkStatus(lines);
-		return lines[0];
+		try {
+			auto resp = sendCommand("QT", 2);
+
+			// Extract nickname from response
+			std::string nickname = resp;
+			size_t okPos = nickname.find("OK");
+			if (okPos != std::string::npos) {
+				nickname = nickname.substr(0, okPos);
+			}
+
+			// Clean up the nickname
+			nickname.erase(std::remove_if(nickname.begin(), nickname.end(),
+							   [](unsigned char c) { return c == '\r' || c == '\n'; }),
+				nickname.end());
+
+			if (nickname.empty()) {
+				return "EBB Controller";
+			}
+
+			return nickname;
+		} catch (const std::exception & e) {
+			ofLogError("ofxEbbControl") << "Error getting nickname: " << e.what();
+			return "EBB Controller";
+		}
 	}
 
 	/**

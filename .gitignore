@@ -88,5 +88,8 @@ Makefile
 tags
 ctags
 
+# custom
+ebbControl.js
+
 # End of .gitignore
 
